@@ -32,6 +32,7 @@ fn supported_protocols(
             Protocol::Tlsv10 => SslVersion::TLS1,
             Protocol::Tlsv11 => SslVersion::TLS1_1,
             Protocol::Tlsv12 => SslVersion::TLS1_2,
+            Protocol::Tlsv13 => SslVersion::TLS1_3,
         }
     }
 
@@ -53,7 +54,8 @@ fn supported_protocols(
         | SslOptions::NO_SSLV3
         | SslOptions::NO_TLSV1
         | SslOptions::NO_TLSV1_1
-        | SslOptions::NO_TLSV1_2;
+        | SslOptions::NO_TLSV1_2
+        | SslOptions::NO_TLSV1_3;
 
     ctx.clear_options(no_ssl_mask);
     let mut options = SslOptions::empty();
@@ -70,13 +72,21 @@ fn supported_protocols(
                 | SslOptions::NO_TLSV1
                 | SslOptions::NO_TLSV1_1
         }
+        Some(Protocol::Tlsv13) => {
+            SslOptions::NO_SSLV2
+                | SslOptions::NO_SSLV3
+                | SslOptions::NO_TLSV1
+                | SslOptions::NO_TLSV1_1
+                | SslOptions::NO_TLSV1_2
+    }
     };
     options |= match max {
-        None | Some(Protocol::Tlsv12) => SslOptions::empty(),
-        Some(Protocol::Tlsv11) => SslOptions::NO_TLSV1_2,
-        Some(Protocol::Tlsv10) => SslOptions::NO_TLSV1_1 | SslOptions::NO_TLSV1_2,
+        None | Some(Protocol::Tlsv13) => SslOptions::empty(),
+        Some(Protocol::Tlsv12) => SslOptions::NO_TLSV1_3,
+        Some(Protocol::Tlsv11) => SslOptions::NO_TLSV1_2 | SslOptions::NO_TLSV1_3,
+        Some(Protocol::Tlsv10) => SslOptions::NO_TLSV1_1 | SslOptions::NO_TLSV1_2 | SslOptions::NO_TLSV1_3,
         Some(Protocol::Sslv3) => {
-            SslOptions::NO_TLSV1 | SslOptions::NO_TLSV1_1 | SslOptions::NO_TLSV1_2
+            SslOptions::NO_TLSV1 | SslOptions::NO_TLSV1_1 | SslOptions::NO_TLSV1_2 | SslOptions::NO_TLSV1_3
         }
     };
 
@@ -115,6 +125,7 @@ pub enum Error {
     Ssl(ssl::Error, X509VerifyResult),
     EmptyChain,
     NotPkcs8,
+    EchConfigError(String),
 }
 
 impl error::Error for Error {
@@ -124,6 +135,7 @@ impl error::Error for Error {
             Error::Ssl(ref e, _) => error::Error::source(e),
             Error::EmptyChain => None,
             Error::NotPkcs8 => None,
+            Error::EchConfigError(_) => None,
         }
     }
 }
@@ -139,6 +151,7 @@ impl fmt::Display for Error {
                 "at least one certificate must be provided to create an identity"
             ),
             Error::NotPkcs8 => write!(fmt, "expected PKCS#8 PEM"),
+            Error::EchConfigError(ref s) => write!(fmt, "Invalid Ech Config: {}", s),
         }
     }
 }
@@ -146,6 +159,12 @@ impl fmt::Display for Error {
 impl From<ErrorStack> for Error {
     fn from(err: ErrorStack) -> Error {
         Error::Normal(err)
+    }
+}
+
+impl From<&str> for Error {
+    fn from(msg: &str) -> Error {
+        Error::EchConfigError(msg.to_owned())
     }
 }
 
@@ -159,14 +178,14 @@ pub struct Identity {
 impl Identity {
     pub fn from_pkcs12(buf: &[u8], pass: &str) -> Result<Identity, Error> {
         let pkcs12 = Pkcs12::from_der(buf)?;
-        let parsed = pkcs12.parse(pass)?;
+        let parsed = pkcs12.parse2(pass)?;
         Ok(Identity {
-            pkey: parsed.pkey,
-            cert: parsed.cert,
+            pkey: parsed.pkey.unwrap(),
+            cert: parsed.cert.unwrap(),
             // > The stack is the reverse of what you might expect due to the way
             // > PKCS12_parse is implemented, so we need to load it backwards.
             // > https://github.com/sfackler/rust-native-tls/commit/05fb5e583be589ab63d9f83d986d095639f8ec44
-            chain: parsed.chain.into_iter().flatten().rev().collect(),
+            chain: parsed.ca.into_iter().flatten().rev().collect(),
         })
     }
 
@@ -268,6 +287,7 @@ pub struct TlsConnector {
     use_sni: bool,
     accept_invalid_hostnames: bool,
     accept_invalid_certs: bool,
+    connect: Option<String>,
 }
 
 impl TlsConnector {
@@ -317,14 +337,46 @@ impl TlsConnector {
             }
         }
 
+        if let Some(ech_config) = &builder.ech_config {
+            if !ech_config.alpn_outer.is_empty() {
+                // Wire format is each alpn preceded by its length as a byte.
+                let mut alpn_outer_wire_format = Vec::with_capacity(
+                    ech_config
+                        .alpn_outer
+                        .iter()
+                        .map(|s| s.as_bytes().len())
+                        .sum::<usize>()
+                        + ech_config.alpn_outer.len(),
+                );
+                for alpn in ech_config.alpn_outer.iter().map(|s| s.as_bytes()) {
+                    alpn_outer_wire_format.push(alpn.len() as u8);
+                    alpn_outer_wire_format.extend(alpn);
+                }
+                connector.ech_set_outer_alpn_protos(&alpn_outer_wire_format)?;
+            }
+        }   
+
         #[cfg(target_os = "android")]
         load_android_root_certs(&mut connector)?;
 
+        let connector = connector.build();
+
+        if let Some(ech_config) = &builder.ech_config {
+            let mut connector_config = connector.configure()?;
+            connector_config.set_hostname("signal7.gluonhq.net")?;
+
+            let binary_config = ech_config.parse_config()?;
+            connector_config.set_ech_config(&binary_config)?;
+
+            connector_config.param_mut().set_host("signal7.gluonhq.net")?;
+        }
+
         Ok(TlsConnector {
-            connector: connector.build(),
+            connector,
             use_sni: builder.use_sni,
             accept_invalid_hostnames: builder.accept_invalid_hostnames,
             accept_invalid_certs: builder.accept_invalid_certs,
+            connect: builder.ech_config.as_ref().and_then(|ech_config| ech_config.outer.to_owned()),
         })
     }
 
@@ -341,7 +393,9 @@ impl TlsConnector {
             ssl.set_verify(SslVerifyMode::NONE);
         }
 
-        let s = ssl.connect(domain, stream)?;
+        let final_domain = self.connect.to_owned().unwrap_or(domain.to_owned());
+        let s = ssl.connect(&final_domain, stream)?;
+
         Ok(TlsStream(s))
     }
 }

@@ -326,6 +326,82 @@ pub enum Protocol {
     Tlsv11,
     /// The TLS 1.2 protocol.
     Tlsv12,
+    /// The TLS 1.3 protocol.
+    Tlsv13,
+}
+
+/// Configuration for Encrypted ClientHello
+pub struct EchConfig {
+    /// The ECH configuration list as an ASCII-HEX encoded string.
+    pub config: Option<String>,
+    /// The outer name to connect to
+    pub outer: Option<String>,
+    /// the outer alpn string to use
+    pub alpn_outer: Vec<String>,
+}
+
+impl Default for EchConfig {
+    fn default() -> EchConfig {
+        EchConfig {
+            config: None,
+            outer: None,
+            alpn_outer: vec![],
+        }
+    }
+}
+
+impl EchConfig {
+    fn parse_config(&self) -> result::Result<Vec<u8>, imp::Error> {
+        if let Some(config) = &self.config {
+            let decoded = hex::decode(&config).unwrap();
+            let mut parsed = Vec::with_capacity(decoded.len());
+
+            let mut pointer = 0;
+            let mut remaining = decoded.len() as u32;
+
+            if remaining < 2 {
+                return Err(imp::Error::from("Too short"));
+            }
+
+            // skip 2 octet priority and TargetName as those are the
+            // application's responsibility, not the library's
+            pointer += 2;
+            remaining -= 2;
+
+            if remaining < 1 {
+                return Err(imp::Error::from("Too short"));
+            }
+
+            // skip domain name
+            pointer += 1;
+            remaining -= 1;
+            if decoded[pointer] == 0 {
+                // . domain
+            } else {
+                // todo: parse full domain from DNS RR
+            }
+
+            while remaining >= 4 {
+                let pcode = u16::from_be_bytes([decoded[pointer], decoded[pointer + 1]]);
+                pointer += 2;
+                let plen = u16::from_be_bytes([decoded[pointer], decoded[pointer + 1]]);
+                pointer += 2;
+                remaining -= 4;
+
+                if pcode == 5 {
+                    parsed = decoded[pointer..pointer + usize::from(plen)].to_vec();
+                    break;
+                } else {
+                    pointer += usize::from(plen);
+                    remaining -= u32::from(plen);
+                }
+            }
+
+            return Ok(parsed);
+        } else {
+            return Err(imp::Error::from("Config was not provided."));
+        }
+    }
 }
 
 /// A builder for `TlsConnector`s.
@@ -340,6 +416,7 @@ pub struct TlsConnectorBuilder {
     disable_built_in_roots: bool,
     #[cfg(feature = "alpn")]
     alpn: Vec<String>,
+    ech_config: Option<EchConfig>,
 }
 
 impl TlsConnectorBuilder {
@@ -395,6 +472,18 @@ impl TlsConnectorBuilder {
     #[cfg_attr(docsrs, doc(cfg(feature = "alpn")))]
     pub fn request_alpns(&mut self, protocols: &[&str]) -> &mut TlsConnectorBuilder {
         self.alpn = protocols.iter().map(|s| (*s).to_owned()).collect();
+        self
+    }
+
+    /// Enables ECH to be used for initial handshake negotiation.
+    ///
+    /// Defaults to being disabled.
+    pub fn ech_config(&mut self, ech_config: EchConfig) -> &mut TlsConnectorBuilder {
+        self.ech_config = Some(EchConfig {
+            config: ech_config.config,
+            outer: ech_config.outer,
+            alpn_outer: ech_config.alpn_outer,
+        });
         self
     }
 
@@ -488,6 +577,7 @@ impl TlsConnector {
             disable_built_in_roots: false,
             #[cfg(feature = "alpn")]
             alpn: vec![],
+            ech_config: None,
         }
     }
 
