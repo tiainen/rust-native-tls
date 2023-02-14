@@ -34,8 +34,8 @@ openssl-probe = "0.1"
 hex = "0.4"
 
 [patch.crates-io]
-openssl = { path = "../rust-openssl/openssl" }
-openssl-sys = { path = "../rust-openssl/openssl-sys" }
+openssl = { git = "https://github.com/tiainen/rust-openssl", branch = "ECH-draft-13c" }
+openssl-sys = { git = "https://github.com/tiainen/rust-openssl", branch = "ECH-draft-13c" }
 
 [dev-dependencies]
 tempfile = "3.0"
