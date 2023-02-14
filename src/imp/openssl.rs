@@ -1,6 +1,8 @@
 extern crate openssl;
 extern crate openssl_probe;
 
+use crate::EchConfig;
+
 use self::openssl::error::ErrorStack;
 use self::openssl::hash::MessageDigest;
 use self::openssl::nid::Nid;
@@ -281,13 +283,19 @@ impl<S> From<ErrorStack> for HandshakeError<S> {
     }
 }
 
+impl<S> From<Error> for HandshakeError<S> {
+    fn from(e: Error) -> HandshakeError<S> {
+        HandshakeError::Failure(e.into())
+    }
+}
+
 #[derive(Clone)]
 pub struct TlsConnector {
     connector: SslConnector,
     use_sni: bool,
     accept_invalid_hostnames: bool,
     accept_invalid_certs: bool,
-    connect: Option<String>,
+    ech_config: Option<EchConfig>,
 }
 
 impl TlsConnector {
@@ -359,24 +367,12 @@ impl TlsConnector {
         #[cfg(target_os = "android")]
         load_android_root_certs(&mut connector)?;
 
-        let connector = connector.build();
-
-        if let Some(ech_config) = &builder.ech_config {
-            let mut connector_config = connector.configure()?;
-            connector_config.set_hostname("signal7.gluonhq.net")?;
-
-            let binary_config = ech_config.parse_config()?;
-            connector_config.set_ech_config(&binary_config)?;
-
-            connector_config.param_mut().set_host("signal7.gluonhq.net")?;
-        }
-
         Ok(TlsConnector {
-            connector,
+            connector: connector.build(),
             use_sni: builder.use_sni,
             accept_invalid_hostnames: builder.accept_invalid_hostnames,
             accept_invalid_certs: builder.accept_invalid_certs,
-            connect: builder.ech_config.as_ref().and_then(|ech_config| ech_config.outer.to_owned()),
+            ech_config: builder.ech_config.clone(),
         })
     }
 
@@ -387,16 +383,31 @@ impl TlsConnector {
         let mut ssl = self
             .connector
             .configure()?
-            .use_server_name_indication(self.use_sni)
+            .use_server_name_indication(self.use_server_name_indication())
             .verify_hostname(!self.accept_invalid_hostnames);
         if self.accept_invalid_certs {
             ssl.set_verify(SslVerifyMode::NONE);
         }
 
-        let final_domain = self.connect.to_owned().unwrap_or(domain.to_owned());
-        let s = ssl.connect(&final_domain, stream)?;
+        if let Some(ech_config) = &self.ech_config {
+            let binary_config = ech_config.parse_config()?;
+            ssl.set_ech_config(&binary_config)?;
+
+            if let Some(inner) = &ech_config.inner {
+                ssl.set_hostname(inner)?;
+            }
+        }
+
+        let s = ssl.connect(domain, stream)?;
 
         Ok(TlsStream(s))
+    }
+
+    fn use_server_name_indication(&self) -> bool {
+        match &self.ech_config.to_owned().and_then(|config| config.inner) {
+            Some(_) => false,
+            None => self.use_sni
+        }
     }
 }
 

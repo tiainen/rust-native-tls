@@ -331,11 +331,12 @@ pub enum Protocol {
 }
 
 /// Configuration for Encrypted ClientHello
+#[derive(Clone)]
 pub struct EchConfig {
     /// The ECH configuration list as an ASCII-HEX encoded string.
     pub config: Option<String>,
-    /// The outer name to connect to
-    pub outer: Option<String>,
+    /// The inner name to use
+    pub inner: Option<String>,
     /// the outer alpn string to use
     pub alpn_outer: Vec<String>,
 }
@@ -344,7 +345,7 @@ impl Default for EchConfig {
     fn default() -> EchConfig {
         EchConfig {
             config: None,
-            outer: None,
+            inner: None,
             alpn_outer: vec![],
         }
     }
@@ -481,7 +482,7 @@ impl TlsConnectorBuilder {
     pub fn ech_config(&mut self, ech_config: EchConfig) -> &mut TlsConnectorBuilder {
         self.ech_config = Some(EchConfig {
             config: ech_config.config,
-            outer: ech_config.outer,
+            inner: ech_config.inner,
             alpn_outer: ech_config.alpn_outer,
         });
         self
