@@ -333,8 +333,8 @@ pub enum Protocol {
 /// Configuration for Encrypted ClientHello
 #[derive(Clone)]
 pub struct EchConfig {
-    /// The ECH configuration list as an ASCII-HEX encoded string.
-    pub config: Option<String>,
+    /// The ECH configuration list in bytes.
+    pub config: Vec<u8>,
     /// The inner name to use
     pub inner: Option<String>,
     /// the outer alpn string to use
@@ -344,63 +344,9 @@ pub struct EchConfig {
 impl Default for EchConfig {
     fn default() -> EchConfig {
         EchConfig {
-            config: None,
+            config: vec![],
             inner: None,
             alpn_outer: vec![],
-        }
-    }
-}
-
-impl EchConfig {
-    fn parse_config(&self) -> result::Result<Vec<u8>, imp::Error> {
-        if let Some(config) = &self.config {
-            let decoded = hex::decode(&config).unwrap();
-            let mut parsed = Vec::with_capacity(decoded.len());
-
-            let mut pointer = 0;
-            let mut remaining = decoded.len() as u32;
-
-            if remaining < 2 {
-                return Err(imp::Error::from("Too short"));
-            }
-
-            // skip 2 octet priority and TargetName as those are the
-            // application's responsibility, not the library's
-            pointer += 2;
-            remaining -= 2;
-
-            if remaining < 1 {
-                return Err(imp::Error::from("Too short"));
-            }
-
-            // skip domain name
-            pointer += 1;
-            remaining -= 1;
-            if decoded[pointer] == 0 {
-                // . domain
-            } else {
-                // todo: parse full domain from DNS RR
-            }
-
-            while remaining >= 4 {
-                let pcode = u16::from_be_bytes([decoded[pointer], decoded[pointer + 1]]);
-                pointer += 2;
-                let plen = u16::from_be_bytes([decoded[pointer], decoded[pointer + 1]]);
-                pointer += 2;
-                remaining -= 4;
-
-                if pcode == 5 {
-                    parsed = decoded[pointer..pointer + usize::from(plen)].to_vec();
-                    break;
-                } else {
-                    pointer += usize::from(plen);
-                    remaining -= u32::from(plen);
-                }
-            }
-
-            return Ok(parsed);
-        } else {
-            return Err(imp::Error::from("Config was not provided."));
         }
     }
 }

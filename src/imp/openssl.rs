@@ -390,8 +390,7 @@ impl TlsConnector {
         }
 
         if let Some(ech_config) = &self.ech_config {
-            let binary_config = ech_config.parse_config()?;
-            ssl.set_ech_config(&binary_config)?;
+            ssl.set_ech_config(&ech_config.config)?;
 
             if let Some(inner) = &ech_config.inner {
                 ssl.set_hostname(inner)?;
